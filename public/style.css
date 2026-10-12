@@ -1,0 +1,305 @@
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: Arial, sans-serif;
+    background: #111827;
+    color: white;
+    min-height: 100vh;
+}
+
+button {
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+}
+
+.hidden {
+    display: none !important;
+}
+
+
+/* HOME PAGE */
+
+.page {
+    min-height: 100vh;
+}
+
+#homePage {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 20px;
+}
+
+#homePage h1 {
+    font-size: 42px;
+    margin-bottom: 15px;
+}
+
+#homePage p {
+    color: #cbd5e1;
+    margin-bottom: 30px;
+    font-size: 18px;
+}
+
+#createRoomBtn {
+    background: #6366f1;
+    color: white;
+    padding: 14px 28px;
+    border-radius: 10px;
+    font-weight: bold;
+}
+
+#createRoomBtn:hover {
+    background: #4f46e5;
+}
+
+
+/* TOP BAR */
+
+.top-bar {
+    background: #1f2937;
+    padding: 15px 25px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #374151;
+}
+
+.top-bar h1 {
+    font-size: 24px;
+}
+
+#roomIdDisplay {
+    background: #374151;
+    padding: 7px 12px;
+    border-radius: 6px;
+    font-family: monospace;
+}
+
+
+/* MAIN CONTAINER */
+
+.main-container {
+    display: grid;
+    grid-template-columns: 1fr 350px;
+    gap: 20px;
+    padding: 20px;
+}
+
+
+/* VIDEO */
+
+.video-section {
+    background: #1f2937;
+    padding: 15px;
+    border-radius: 12px;
+}
+
+video {
+    width: 100%;
+    max-height: 70vh;
+    background: black;
+    border-radius: 8px;
+    display: block;
+}
+
+.video-info {
+    padding: 12px 5px 5px;
+}
+
+.video-info h2 {
+    margin-bottom: 6px;
+}
+
+#hostStatus {
+    color: #a5b4fc;
+}
+
+
+/* SIDE PANEL */
+
+.side-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+
+/* USERS */
+
+.users-box,
+.chat-box {
+    background: #1f2937;
+    border-radius: 12px;
+    padding: 15px;
+}
+
+.users-box h3,
+.chat-box h3 {
+    margin-bottom: 12px;
+}
+
+#usersList {
+    list-style: none;
+}
+
+#usersList li {
+    padding: 8px;
+    border-bottom: 1px solid #374151;
+}
+
+
+/* CHAT */
+
+.chat-box {
+    display: flex;
+    flex-direction: column;
+    height: 400px;
+}
+
+#messages {
+    flex: 1;
+    overflow-y: auto;
+    background: #111827;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 10px;
+}
+
+.message {
+    padding: 7px 5px;
+    word-wrap: break-word;
+}
+
+.message strong {
+    color: #a5b4fc;
+}
+
+.chat-input {
+    display: flex;
+    gap: 8px;
+}
+
+.chat-input input {
+    flex: 1;
+    min-width: 0;
+    padding: 11px;
+    border: none;
+    border-radius: 7px;
+    background: #374151;
+    color: white;
+    outline: none;
+}
+
+.chat-input button {
+    background: #6366f1;
+    color: white;
+    padding: 10px 14px;
+    border-radius: 7px;
+}
+
+
+/* JOIN MODAL */
+
+.modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+
+    display: flex;
+    justify-content: center;
+    align-items: center;
+
+    padding: 20px;
+}
+
+.modal-content {
+    width: 100%;
+    max-width: 400px;
+
+    background: #1f2937;
+    padding: 30px;
+    border-radius: 15px;
+
+    text-align: center;
+}
+
+.modal-content h2 {
+    margin-bottom: 10px;
+}
+
+.modal-content p {
+    color: #cbd5e1;
+    margin-bottom: 20px;
+}
+
+.modal-content input {
+    width: 100%;
+    padding: 13px;
+    margin-bottom: 15px;
+
+    border: none;
+    border-radius: 8px;
+
+    background: #374151;
+    color: white;
+
+    outline: none;
+}
+
+#joinRoomBtn {
+    width: 100%;
+    padding: 13px;
+
+    background: #6366f1;
+    color: white;
+
+    border-radius: 8px;
+    font-weight: bold;
+}
+
+
+/* MOBILE */
+
+@media (max-width: 800px) {
+
+    .top-bar {
+        padding: 12px 15px;
+    }
+
+    .top-bar h1 {
+        font-size: 19px;
+    }
+
+    .top-bar div {
+        font-size: 13px;
+    }
+
+    .main-container {
+        grid-template-columns: 1fr;
+        padding: 10px;
+    }
+
+    .side-panel {
+        width: 100%;
+    }
+
+    video {
+        max-height: 50vh;
+    }
+
+    .chat-box {
+        height: 350px;
+    }
+
+    #homePage h1 {
+        font-size: 32px;
+    }
+}

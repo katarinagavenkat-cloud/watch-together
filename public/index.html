@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Watch Together</title>
+
+    <link rel="stylesheet" href="/style.css">
+
+    <script src="/socket.io/socket.io.js"></script>
+</head>
+
+<body>
+
+    <!-- HOME PAGE -->
+    <div id="homePage" class="page">
+
+        <h1>🎬 Watch Together</h1>
+
+        <p>Watch movies together with your friends.</p>
+
+        <button id="createRoomBtn">
+            Create Room
+        </button>
+
+    </div>
+
+
+    <!-- ROOM PAGE -->
+    <div id="roomPage" class="page hidden">
+
+        <div class="top-bar">
+
+            <h1>🎬 Watch Together</h1>
+
+            <div>
+                Room:
+                <span id="roomIdDisplay"></span>
+            </div>
+
+        </div>
+
+
+        <div class="main-container">
+
+            <!-- VIDEO SECTION -->
+            <div class="video-section">
+
+                <video
+                    id="video"
+                    controls
+                    playsinline
+                >
+                    <source src="/movie.mp4" type="video/mp4">
+                    Your browser does not support video.
+                </video>
+
+                <div class="video-info">
+
+                    <h2>Movie</h2>
+
+                    <p id="hostStatus">
+                        Connecting...
+                    </p>
+
+                </div>
+
+            </div>
+
+
+            <!-- SIDE PANEL -->
+            <div class="side-panel">
+
+                <!-- USERS -->
+                <div class="users-box">
+
+                    <h3>👥 People in Room</h3>
+
+                    <ul id="usersList"></ul>
+
+                </div>
+
+
+                <!-- CHAT -->
+                <div class="chat-box">
+
+                    <h3>💬 Chat</h3>
+
+                    <div id="messages"></div>
+
+                    <div class="chat-input">
+
+                        <input
+                            type="text"
+                            id="messageInput"
+                            placeholder="Type a message..."
+                            maxlength="300"
+                        >
+
+                        <button id="sendMessageBtn">
+                            Send
+                        </button>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- JOIN ROOM POPUP -->
+    <div id="joinModal" class="modal hidden">
+
+        <div class="modal-content">
+
+            <h2>Join Room 🎬</h2>
+
+            <p>Enter your name</p>
+
+            <p style="font-size: 14px; color: #a5b4fc;">
+                After joining, tap the video once to allow playback.
+            </p>
+
+            <input
+                type="text"
+                id="nameInput"
+                placeholder="Your name"
+                maxlength="30"
+            >
+
+            <button id="joinRoomBtn">
+                Join Room
+            </button>
+
+        </div>
+
+    </div>
+
+
+    <script src="/app.js"></script>
+
+</body>
+</html>
