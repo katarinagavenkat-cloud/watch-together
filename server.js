@@ -2,9 +2,17 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const crypto = require("crypto");
-const multer = require("multer");
-const path = require("path");
-const fs = require("fs");
+
+const {
+    S3Client,
+    CreateMultipartUploadCommand,
+    UploadPartCommand,
+    CompleteMultipartUploadCommand,
+    AbortMultipartUploadCommand,
+    GetObjectCommand
+} = require("@aws-sdk/client-s3");
+
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
 const app = express();
 const server = http.createServer(app);
@@ -12,290 +20,471 @@ const io = new Server(server);
 
 const PORT = process.env.PORT || 3000;
 
+// ======================================================
+// CLOUDFLARE R2 CONFIGURATION
+// ======================================================
 
-// =====================================================
-// UPLOAD FOLDER
-// =====================================================
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
+const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
+const R2_BUCKET_NAME =
+    process.env.R2_BUCKET_NAME || "watch-together-movies";
 
-const uploadDir = path.join(
-    __dirname,
-    "public",
-    "uploads"
-);
+const R2_ENDPOINT =
+    process.env.R2_ENDPOINT ||
+    (R2_ACCOUNT_ID
+        ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`
+        : null);
 
-if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, {
-        recursive: true
-    });
+if (
+    !R2_ACCESS_KEY_ID ||
+    !R2_SECRET_ACCESS_KEY ||
+    !R2_ACCOUNT_ID ||
+    !R2_ENDPOINT
+) {
+    console.warn("⚠️ R2 environment variables are incomplete.");
 }
 
-
-// =====================================================
-// SERVE PUBLIC FILES
-// =====================================================
-
-app.use(
-    express.static(
-        path.join(__dirname, "public")
-    )
-);
-
-
-// IMPORTANT:
-// Explicitly serve uploaded movies
-app.use(
-    "/uploads",
-    express.static(uploadDir)
-);
-
-
-// =====================================================
-// MULTER UPLOAD SETTINGS
-// =====================================================
-
-const storage = multer.diskStorage({
-
-    destination: (req, file, cb) => {
-
-        cb(null, uploadDir);
-
-    },
-
-    filename: (req, file, cb) => {
-
-        const extension =
-            path.extname(file.originalname);
-
-        const uniqueName =
-            Date.now() +
-            "-" +
-            crypto.randomBytes(6).toString("hex") +
-            extension;
-
-        cb(null, uniqueName);
-
+const r2 = new S3Client({
+    region: "auto",
+    endpoint: R2_ENDPOINT || undefined,
+    credentials: {
+        accessKeyId: R2_ACCESS_KEY_ID || "",
+        secretAccessKey: R2_SECRET_ACCESS_KEY || ""
     }
-
 });
 
+// ======================================================
+// EXPRESS
+// ======================================================
 
-const upload = multer({
+app.use(express.json({ limit: "2mb" }));
 
-    storage: storage,
+app.use(express.static("public"));
 
-    limits: {
-
-        // Maximum 5 GB
-        fileSize:
-            5 * 1024 * 1024 * 1024
-
-    }
-
-});
-
-
-// =====================================================
+// ======================================================
 // ROOMS
-// =====================================================
+// ======================================================
 
 const rooms = new Map();
 
+// Active multipart uploads
+const activeUploads = new Map();
 
-// =====================================================
-// CREATE ROOM ID
-// =====================================================
+// ======================================================
+// ROOM ID
+// ======================================================
 
 function createRoomId() {
-
-    return crypto
-        .randomBytes(4)
-        .toString("hex");
-
+    return crypto.randomBytes(4).toString("hex");
 }
 
-
-// =====================================================
+// ======================================================
 // CREATE ROOM
-// =====================================================
+// ======================================================
 
 app.get("/create-room", (req, res) => {
-
-    const roomId =
-        createRoomId();
+    const roomId = createRoomId();
 
     rooms.set(roomId, {
-
         hostId: null,
-
         users: new Map(),
 
         playing: false,
-
         currentTime: 0,
-
         updatedAt: Date.now(),
 
-        movieUrl: null,
-
+        movieKey: null,
         movieName: null
-
     });
 
-    res.redirect(
-        `/room/${roomId}`
-    );
-
+    res.redirect(`/room/${roomId}`);
 });
 
-
-// =====================================================
-// OPEN ROOM
-// =====================================================
+// ======================================================
+// ROOM PAGE
+// ======================================================
 
 app.get("/room/:roomId", (req, res) => {
-
-    res.sendFile(
-        path.join(
-            __dirname,
-            "public",
-            "index.html"
-        )
-    );
-
+    res.sendFile(__dirname + "/public/index.html");
 });
 
+// ======================================================
+// CHECK R2
+// ======================================================
 
-// =====================================================
-// UPLOAD MOVIE
-// =====================================================
+function checkR2(res) {
+    if (
+        !R2_ACCESS_KEY_ID ||
+        !R2_SECRET_ACCESS_KEY ||
+        !R2_ACCOUNT_ID ||
+        !R2_BUCKET_NAME
+    ) {
+        res.status(500).json({
+            success: false,
+            error: "Cloudflare R2 is not configured correctly."
+        });
 
-app.post(
-    "/upload-movie",
-    upload.single("movie"),
-    (req, res) => {
+        return false;
+    }
 
-        try {
+    return true;
+}
 
-            const roomId =
-                req.body.roomId;
+// ======================================================
+// CREATE MULTIPART UPLOAD
+// ======================================================
 
-            const room =
-                rooms.get(roomId);
+app.post("/upload/initiate", async (req, res) => {
+    try {
+        if (!checkR2(res)) return;
 
+        const {
+            roomId,
+            socketId,
+            fileName,
+            contentType
+        } = req.body;
 
-            // Room doesn't exist
-            if (!room) {
+        if (!roomId || !socketId || !fileName) {
+            return res.status(400).json({
+                success: false,
+                error: "Missing upload information."
+            });
+        }
 
-                if (req.file) {
+        const room = rooms.get(roomId);
 
-                    try {
+        if (!room) {
+            return res.status(404).json({
+                success: false,
+                error: "Room not found."
+            });
+        }
 
-                        fs.unlinkSync(
-                            req.file.path
-                        );
+        // Only host can upload
+        if (socketId !== room.hostId) {
+            return res.status(403).json({
+                success: false,
+                error: "Only the host can upload a movie."
+            });
+        }
 
-                    } catch (error) {
+        // Clean filename
+        const safeName = String(fileName)
+            .replace(/[^a-zA-Z0-9._-]/g, "_")
+            .slice(0, 200);
 
-                        console.log(
-                            "Could not delete uploaded file."
-                        );
+        const key =
+            `rooms/${roomId}/` +
+            `${Date.now()}-${crypto.randomBytes(6).toString("hex")}-${safeName}`;
 
-                    }
+        const command = new CreateMultipartUploadCommand({
+            Bucket: R2_BUCKET_NAME,
+            Key: key,
+            ContentType: contentType || "application/octet-stream"
+        });
 
+        const result = await r2.send(command);
+
+        activeUploads.set(result.UploadId, {
+            roomId,
+            socketId,
+            key,
+            fileName: safeName,
+            contentType:
+                contentType || "application/octet-stream",
+            createdAt: Date.now()
+        });
+
+        console.log(
+            `Started R2 multipart upload: ${safeName}`
+        );
+
+        res.json({
+            success: true,
+            uploadId: result.UploadId,
+            key
+        });
+
+    } catch (error) {
+
+        console.error("R2 initiate error:", error);
+
+        res.status(500).json({
+            success: false,
+            error: "Could not start upload."
+        });
+    }
+});
+
+// ======================================================
+// GET PRESIGNED URL FOR PART
+// ======================================================
+
+app.post("/upload/presign-part", async (req, res) => {
+    try {
+        if (!checkR2(res)) return;
+
+        const {
+            uploadId,
+            partNumber
+        } = req.body;
+
+        if (!uploadId || !partNumber) {
+            return res.status(400).json({
+                success: false,
+                error: "Missing upload part information."
+            });
+        }
+
+        const upload = activeUploads.get(uploadId);
+
+        if (!upload) {
+            return res.status(404).json({
+                success: false,
+                error: "Upload not found."
+            });
+        }
+
+        const part = Number(partNumber);
+
+        if (
+            !Number.isInteger(part) ||
+            part < 1 ||
+            part > 10000
+        ) {
+            return res.status(400).json({
+                success: false,
+                error: "Invalid part number."
+            });
+        }
+
+        const command = new UploadPartCommand({
+            Bucket: R2_BUCKET_NAME,
+            Key: upload.key,
+            UploadId: uploadId,
+            PartNumber: part
+        });
+
+        const signedUrl = await getSignedUrl(
+            r2,
+            command,
+            {
+                expiresIn: 60 * 60
+            }
+        );
+
+        res.json({
+            success: true,
+            url: signedUrl
+        });
+
+    } catch (error) {
+
+        console.error("Presign error:", error);
+
+        res.status(500).json({
+            success: false,
+            error: "Could not create upload URL."
+        });
+    }
+});
+
+// ======================================================
+// COMPLETE MULTIPART UPLOAD
+// ======================================================
+
+app.post("/upload/complete", async (req, res) => {
+    try {
+        if (!checkR2(res)) return;
+
+        const {
+            uploadId,
+            parts
+        } = req.body;
+
+        if (!uploadId || !Array.isArray(parts)) {
+            return res.status(400).json({
+                success: false,
+                error: "Missing upload completion information."
+            });
+        }
+
+        const upload = activeUploads.get(uploadId);
+
+        if (!upload) {
+            return res.status(404).json({
+                success: false,
+                error: "Upload not found."
+            });
+        }
+
+        const room = rooms.get(upload.roomId);
+
+        if (!room) {
+            return res.status(404).json({
+                success: false,
+                error: "Room no longer exists."
+            });
+        }
+
+        // Only original host can complete upload
+        if (upload.socketId !== room.hostId) {
+            return res.status(403).json({
+                success: false,
+                error: "Only the host can complete the upload."
+            });
+        }
+
+        const cleanedParts = parts
+            .map((part) => ({
+                ETag: part.ETag,
+                PartNumber: Number(part.PartNumber)
+            }))
+            .filter(
+                (part) =>
+                    part.ETag &&
+                    Number.isInteger(part.PartNumber)
+            )
+            .sort(
+                (a, b) =>
+                    a.PartNumber - b.PartNumber
+            );
+
+        if (cleanedParts.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: "No uploaded parts found."
+            });
+        }
+
+        const command =
+            new CompleteMultipartUploadCommand({
+                Bucket: R2_BUCKET_NAME,
+                Key: upload.key,
+                UploadId: uploadId,
+                MultipartUpload: {
+                    Parts: cleanedParts
                 }
-
-                return res
-                    .status(404)
-                    .json({
-
-                        success: false,
-
-                        message:
-                            "Room not found."
-
-                    });
-
-            }
-
-
-            // No file
-            if (!req.file) {
-
-                return res
-                    .status(400)
-                    .json({
-
-                        success: false,
-
-                        message:
-                            "No movie selected."
-
-                    });
-
-            }
-
-
-            console.log(
-                "Movie uploaded:",
-                req.file.filename
-            );
-
-
-            console.log(
-                "Movie location:",
-                req.file.path
-            );
-
-
-            // URL used by browser
-            const movieUrl =
-                "/uploads/" +
-                encodeURIComponent(
-                    req.file.filename
-                );
-
-
-            res.json({
-
-                success: true,
-
-                movieUrl:
-                    movieUrl,
-
-                movieName:
-                    req.file.originalname
-
             });
 
-        }
+        await r2.send(command);
 
-        catch (error) {
+        // Save movie in room
+        room.movieKey = upload.key;
+        room.movieName = upload.fileName;
 
-            console.error(
-                "UPLOAD ERROR:",
-                error
-            );
+        // Reset playback
+        room.playing = false;
+        room.currentTime = 0;
+        room.updatedAt = Date.now();
 
-            res
-                .status(500)
-                .json({
+        activeUploads.delete(uploadId);
 
-                    success: false,
+        // Create a temporary playback URL
+        const getCommand =
+            new GetObjectCommand({
+                Bucket: R2_BUCKET_NAME,
+                Key: room.movieKey
+            });
 
-                    message:
-                        "Movie upload failed."
+        const movieUrl = await getSignedUrl(
+            r2,
+            getCommand,
+            {
+                expiresIn: 60 * 60 * 24
+            }
+        );
 
-                });
+        console.log(
+            `R2 upload completed: ${upload.fileName}`
+        );
 
-        }
+        // Tell everyone
+        io.to(upload.roomId).emit(
+            "movie-changed",
+            {
+                movieUrl,
+                movieName: room.movieName
+            }
+        );
 
+        res.json({
+            success: true,
+            movieUrl,
+            movieName: room.movieName
+        });
+
+    } catch (error) {
+
+        console.error(
+            "R2 complete error:",
+            error
+        );
+
+        res.status(500).json({
+            success: false,
+            error: "Could not complete upload."
+        });
     }
-);
+});
 
+// ======================================================
+// ABORT UPLOAD
+// ======================================================
 
-// =====================================================
+app.post("/upload/abort", async (req, res) => {
+    try {
+        if (!checkR2(res)) return;
+
+        const { uploadId } = req.body;
+
+        const upload =
+            activeUploads.get(uploadId);
+
+        if (!upload) {
+            return res.json({
+                success: true
+            });
+        }
+
+        const command =
+            new AbortMultipartUploadCommand({
+                Bucket: R2_BUCKET_NAME,
+                Key: upload.key,
+                UploadId: uploadId
+            });
+
+        await r2.send(command);
+
+        activeUploads.delete(uploadId);
+
+        console.log(
+            `R2 upload aborted: ${upload.fileName}`
+        );
+
+        res.json({
+            success: true
+        });
+
+    } catch (error) {
+
+        console.error(
+            "R2 abort error:",
+            error
+        );
+
+        res.status(500).json({
+            success: false,
+            error: "Could not abort upload."
+        });
+    }
+});
+
+// ======================================================
 // SOCKET.IO
-// =====================================================
+// ======================================================
 
 io.on("connection", (socket) => {
 
@@ -304,18 +493,15 @@ io.on("connection", (socket) => {
         socket.id
     );
 
-
-    // =================================================
+    // ==================================================
     // JOIN ROOM
-    // =================================================
+    // ==================================================
 
     socket.on(
         "join-room",
-        ({ roomId, name }) => {
+        async ({ roomId, name }) => {
 
-            const room =
-                rooms.get(roomId);
-
+            const room = rooms.get(roomId);
 
             if (!room) {
 
@@ -325,50 +511,68 @@ io.on("connection", (socket) => {
                 );
 
                 return;
-
             }
-
 
             socket.join(roomId);
 
-
-            // First person becomes host
+            // First user becomes host
             if (!room.hostId) {
-
-                room.hostId =
-                    socket.id;
-
+                room.hostId = socket.id;
             }
 
+            const userName =
+                name || "Guest";
 
             room.users.set(
                 socket.id,
                 {
-
-                    name:
-                        name ||
-                        "Guest"
-
+                    name: userName
                 }
             );
 
+            socket.roomId = roomId;
+            socket.userName = userName;
 
-            socket.roomId =
-                roomId;
+            let movieUrl = null;
 
-            socket.userName =
-                name ||
-                "Guest";
+            // Create fresh signed URL
+            // for existing movie
+            if (room.movieKey) {
 
+                try {
+
+                    const command =
+                        new GetObjectCommand({
+                            Bucket:
+                                R2_BUCKET_NAME,
+                            Key:
+                                room.movieKey
+                        });
+
+                    movieUrl =
+                        await getSignedUrl(
+                            r2,
+                            command,
+                            {
+                                expiresIn:
+                                    60 * 60 * 24
+                            }
+                        );
+
+                } catch (error) {
+
+                    console.error(
+                        "Could not create movie URL:",
+                        error
+                    );
+                }
+            }
 
             // Send current room state
             socket.emit(
                 "room-state",
                 {
-
-                    roomId:
-                        roomId,
-
+                    roomId,
                     isHost:
                         socket.id ===
                         room.hostId,
@@ -379,123 +583,33 @@ io.on("connection", (socket) => {
                     currentTime:
                         room.currentTime,
 
-                    movieUrl:
-                        room.movieUrl,
-
+                    movieUrl,
                     movieName:
                         room.movieName
-
                 }
             );
 
-
-            // Update users
+            // Users
             io.to(roomId).emit(
                 "users-update",
                 getUsers(room)
             );
 
-
-            // Update host
+            // Host
             io.to(roomId).emit(
                 "host-changed",
                 room.hostId
             );
 
-
             console.log(
-                `${name || "Guest"} joined room ${roomId}`
+                `${userName} joined room ${roomId}`
             );
-
         }
     );
 
-
-    // =================================================
-    // MOVIE UPLOADED
-    // =================================================
-
-    socket.on(
-        "movie-uploaded",
-        (data) => {
-
-            const roomId =
-                socket.roomId;
-
-            const room =
-                rooms.get(roomId);
-
-
-            if (!room) {
-
-                return;
-
-            }
-
-
-            // Only host can upload
-            if (
-                socket.id !==
-                room.hostId
-            ) {
-
-                return;
-
-            }
-
-
-            room.movieUrl =
-                data.movieUrl;
-
-            room.movieName =
-                data.movieName ||
-                "Movie";
-
-
-            // Reset video
-            room.playing =
-                false;
-
-            room.currentTime =
-                0;
-
-            room.updatedAt =
-                Date.now();
-
-
-            console.log(
-                "Movie added to room:",
-                roomId
-            );
-
-
-            console.log(
-                "Movie URL:",
-                room.movieUrl
-            );
-
-
-            // Tell everyone
-            io.to(roomId).emit(
-                "movie-changed",
-                {
-
-                    movieUrl:
-                        room.movieUrl,
-
-                    movieName:
-                        room.movieName
-
-                }
-            );
-
-        }
-    );
-
-
-    // =================================================
+    // ==================================================
     // CHAT
-    // =================================================
+    // ==================================================
 
     socket.on(
         "chat-message",
@@ -504,43 +618,36 @@ io.on("connection", (socket) => {
             const roomId =
                 socket.roomId;
 
-
             if (
                 !roomId ||
                 !rooms.has(roomId)
             ) {
-
                 return;
-
             }
 
-
             const cleanMessage =
-                String(message)
-                    .slice(0, 300);
-
+                String(message).slice(
+                    0,
+                    300
+                );
 
             io.to(roomId).emit(
                 "chat-message",
                 {
-
                     name:
                         socket.userName ||
                         "Guest",
 
                     message:
                         cleanMessage
-
                 }
             );
-
         }
     );
 
-
-    // =================================================
-    // VIDEO CONTROLS
-    // =================================================
+    // ==================================================
+    // VIDEO CONTROL
+    // ==================================================
 
     socket.on(
         "video-control",
@@ -552,32 +659,24 @@ io.on("connection", (socket) => {
             const room =
                 rooms.get(roomId);
 
-
             if (!room) {
-
                 return;
-
             }
 
-
-            // Only host controls video
+            // Only host controls movie
             if (
                 socket.id !==
                 room.hostId
             ) {
-
                 return;
-
             }
-
 
             if (
                 data.action ===
                 "play"
             ) {
 
-                room.playing =
-                    true;
+                room.playing = true;
 
                 room.currentTime =
                     Number(
@@ -586,17 +685,14 @@ io.on("connection", (socket) => {
 
                 room.updatedAt =
                     Date.now();
-
             }
-
 
             if (
                 data.action ===
                 "pause"
             ) {
 
-                room.playing =
-                    false;
+                room.playing = false;
 
                 room.currentTime =
                     Number(
@@ -605,9 +701,7 @@ io.on("connection", (socket) => {
 
                 room.updatedAt =
                     Date.now();
-
             }
-
 
             if (
                 data.action ===
@@ -621,33 +715,26 @@ io.on("connection", (socket) => {
 
                 room.updatedAt =
                     Date.now();
-
             }
 
-
-            // Send to everyone except host
             socket
                 .to(roomId)
                 .emit(
                     "video-control",
                     {
-
                         action:
                             data.action,
 
                         currentTime:
                             room.currentTime
-
                     }
                 );
-
         }
     );
 
-
-    // =================================================
+    // ==================================================
     // DISCONNECT
-    // =================================================
+    // ==================================================
 
     socket.on(
         "disconnect",
@@ -656,50 +743,36 @@ io.on("connection", (socket) => {
             const roomId =
                 socket.roomId;
 
-
             if (!roomId) {
-
                 return;
-
             }
-
 
             const room =
                 rooms.get(roomId);
 
-
             if (!room) {
-
                 return;
-
             }
-
 
             room.users.delete(
                 socket.id
             );
 
-
-            // If host leaves
+            // Host leaves
             if (
                 socket.id ===
                 room.hostId
             ) {
 
                 const nextUser =
-                    room.users
-                        .keys()
-                        .next();
-
+                    room.users.keys().next();
 
                 if (!nextUser.done) {
 
                     room.hostId =
                         nextUser.value;
 
-                }
-
-                else {
+                } else {
 
                     rooms.delete(
                         roomId
@@ -710,43 +783,34 @@ io.on("connection", (socket) => {
                     );
 
                     return;
-
                 }
-
 
                 io.to(roomId).emit(
                     "host-changed",
                     room.hostId
                 );
-
             }
-
 
             io.to(roomId).emit(
                 "users-update",
                 getUsers(room)
             );
 
-
             console.log(
                 "User disconnected:",
                 socket.id
             );
-
         }
     );
-
 });
 
-
-// =====================================================
+// ======================================================
 // GET USERS
-// =====================================================
+// ======================================================
 
 function getUsers(room) {
 
     const users = [];
-
 
     for (
         const [id, user]
@@ -754,30 +818,22 @@ function getUsers(room) {
     ) {
 
         users.push({
-
-            id:
-                id,
+            id,
 
             name:
                 user.name,
 
             isHost:
-                id ===
-                room.hostId
-
+                id === room.hostId
         });
-
     }
 
-
     return users;
-
 }
 
-
-// =====================================================
+// ======================================================
 // START SERVER
-// =====================================================
+// ======================================================
 
 server.listen(
     PORT,
@@ -789,8 +845,7 @@ server.listen(
         );
 
         console.log(
-            `Upload folder: ${uploadDir}`
+            "Cloudflare R2 upload system ready."
         );
-
     }
 );
